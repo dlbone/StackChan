@@ -17,6 +17,7 @@
 #include <esp_lcd_ili9341.h>
 #include <esp_timer.h>
 #include <algorithm>
+#include <mutex>
 #include "stackchan_camera.h"
 #include "hal_bridge.h"
 
@@ -269,26 +270,36 @@ private:
     esp_timer_handle_t touchpad_timer_;
     PowerSaveTimer* power_save_timer_;
     hal_bridge::XiaozhiConfig_t xiaozhi_config_;
-    bool last_power_save_enabled_      = false;
-    int64_t last_power_state_check_ms_ = 0;
+    std::mutex power_save_state_mutex_;
+    bool power_state_allows_power_save_ = false;
+    bool codex_pet_is_running_           = false;
+    bool power_save_timer_enabled_       = false;
+    int64_t last_power_state_check_ms_   = 0;
 
     bool ShouldEnablePowerSave(bool has_external_power, bool is_discharging) const
     {
         return is_discharging || (has_external_power && xiaozhi_config_.allowShutdownWhenCharging);
     }
 
-    void UpdatePowerSaveEnabled(bool has_external_power, bool is_discharging)
+    void ApplyPowerSaveTimerEnabled()
     {
-        const bool should_enable_power_save = ShouldEnablePowerSave(has_external_power, is_discharging);
-        if (should_enable_power_save == last_power_save_enabled_) {
+        const bool should_enable_power_save = power_state_allows_power_save_ && !codex_pet_is_running_;
+        if (should_enable_power_save == power_save_timer_enabled_) {
             return;
         }
 
-        ESP_LOGI(TAG, "Power save timer %s: external_power=%d, discharging=%d, allowShutdownWhenCharging=%d",
-                 should_enable_power_save ? "enabled" : "disabled", has_external_power, is_discharging,
-                 xiaozhi_config_.allowShutdownWhenCharging);
+        ESP_LOGI(TAG, "Power save timer %s: power_state_allows=%d, codex_pet_running=%d",
+                 should_enable_power_save ? "enabled" : "disabled", power_state_allows_power_save_,
+                 codex_pet_is_running_);
         power_save_timer_->SetEnabled(should_enable_power_save);
-        last_power_save_enabled_ = should_enable_power_save;
+        power_save_timer_enabled_ = should_enable_power_save;
+    }
+
+    void UpdatePowerSaveAllowedByPowerState(bool has_external_power, bool is_discharging)
+    {
+        std::lock_guard<std::mutex> lock(power_save_state_mutex_);
+        power_state_allows_power_save_ = ShouldEnablePowerSave(has_external_power, is_discharging);
+        ApplyPowerSaveTimerEnabled();
     }
 
     void PollPowerSaveState()
@@ -304,7 +315,7 @@ private:
             ESP_LOGW(TAG, "Skipped power-save update because the PMIC status read timed out");
             return;
         }
-        UpdatePowerSaveEnabled(power_state.has_external_power, power_state.is_discharging);
+        UpdatePowerSaveAllowedByPowerState(power_state.has_external_power, power_state.is_discharging);
     }
 
     void InitializePowerSaveTimer()
@@ -336,7 +347,7 @@ private:
             ESP_LOGW(TAG, "Initial PMIC status read timed out; power-save state will update on the next poll");
             return;
         }
-        UpdatePowerSaveEnabled(power_state.has_external_power, power_state.is_discharging);
+        UpdatePowerSaveAllowedByPowerState(power_state.has_external_power, power_state.is_discharging);
     }
 
     void InitializeI2c()
@@ -566,16 +577,22 @@ public:
             return false;
         }
 
-        static bool last_discharging = false;
-        charging                     = power_state.is_charging;
-        discharging                  = power_state.is_discharging;
-        if (discharging != last_discharging) {
-            power_save_timer_->SetEnabled(discharging);
-            last_discharging = discharging;
-        }
+        charging    = power_state.is_charging;
+        discharging = power_state.is_discharging;
 
         level = current_level;
         return true;
+    }
+
+    void SetCodexPetRunning(bool is_running)
+    {
+        std::lock_guard<std::mutex> lock(power_save_state_mutex_);
+        if (codex_pet_is_running_ == is_running) {
+            return;
+        }
+
+        codex_pet_is_running_ = is_running;
+        ApplyPowerSaveTimerEnabled();
     }
 
     virtual void SetPowerSaveLevel(PowerSaveLevel level) override
@@ -637,6 +654,12 @@ bool hal_bridge::board_is_battery_charging()
     } else {
         return false;
     }
+}
+
+void hal_bridge::board_set_codex_pet_running(bool is_running)
+{
+    auto& board = static_cast<M5StackCoreS3Board&>(Board::GetInstance());
+    board.SetCodexPetRunning(is_running);
 }
 
 void hal_bridge::board_set_backlight_brightness(uint8_t brightness, bool permanent)

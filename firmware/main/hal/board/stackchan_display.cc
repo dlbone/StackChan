@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "stackchan_display.h"
+#include "hal_bridge.h"
 #include <esp_log.h>
 #include <esp_err.h>
 #include <esp_lvgl_port.h>
@@ -222,6 +223,7 @@ StackChanAvatarDisplay::~StackChanAvatarDisplay()
         vTaskDelete(codex_pet_task_);
         codex_pet_task_ = nullptr;
     }
+    hal_bridge::board_set_codex_pet_running(false);
     codex_pet_view_.reset();
 
     if (preview_timer_ != nullptr) {
@@ -343,6 +345,10 @@ void StackChanAvatarDisplay::RunCodexPetTask()
             if (!FetchCodexPet(codexPetData)) {
                 codexPetData.state = CodexPetState::Idle;
             }
+            if (!codex_pet_active_.load() || codex_pet_stop_requested_.load()) {
+                break;
+            }
+            hal_bridge::board_set_codex_pet_running(codexPetData.state == CodexPetState::Running);
             {
                 std::lock_guard<std::mutex> lock(codex_pet_data_mutex_);
                 codex_pet_pending_data_ = std::move(codexPetData);
@@ -350,6 +356,7 @@ void StackChanAvatarDisplay::RunCodexPetTask()
             codex_pet_data_pending_.store(true);
             ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(CODEX_PET_REFRESH_INTERVAL_MS));
         }
+        hal_bridge::board_set_codex_pet_running(false);
     }
     vTaskDelete(nullptr);
 }
@@ -421,6 +428,7 @@ void StackChanAvatarDisplay::SetCodexPetActive(bool active)
             xTaskNotifyGive(codex_pet_task_);
         }
     } else if (!active && was_active) {
+        hal_bridge::board_set_codex_pet_running(false);
         if (codex_pet_view_) {
             codex_pet_view_->hide();
         }
