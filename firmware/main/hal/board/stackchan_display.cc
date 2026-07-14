@@ -17,11 +17,29 @@
 #include <stackchan/stackchan.h>
 #include <assets/lang_config.h>
 #include <hal/hal.h>
+#include <ArduinoJson.hpp>
+#include <board.h>
+#include <ota.h>
 
 using namespace stackchan;
 using namespace stackchan::avatar;
 
 #define TAG "StackChanAvatarDisplay"
+
+static constexpr uint32_t CODEX_PET_REFRESH_INTERVAL_MS = 1000;
+
+static std::string get_stackchan_endpoint(const char* path)
+{
+    Ota ota;
+    std::string ota_url = ota.GetCheckVersionUrl();
+    size_t scheme_end   = ota_url.find("://");
+    if (scheme_end == std::string::npos) {
+        return "";
+    }
+    size_t path_start = ota_url.find('/', scheme_end + 3);
+    std::string origin = path_start == std::string::npos ? ota_url : ota_url.substr(0, path_start);
+    return origin + path;
+}
 
 LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 LV_FONT_DECLARE(BUILTIN_ICON_FONT);
@@ -198,6 +216,14 @@ StackChanAvatarDisplay::~StackChanAvatarDisplay()
 {
     ESP_LOGI(TAG, "Destroying StackChanAvatarDisplay");
 
+    codex_pet_stop_requested_.store(true);
+    if (codex_pet_task_ != nullptr) {
+        xTaskNotifyGive(codex_pet_task_);
+        vTaskDelete(codex_pet_task_);
+        codex_pet_task_ = nullptr;
+    }
+    codex_pet_view_.reset();
+
     if (preview_timer_ != nullptr) {
         esp_timer_stop(preview_timer_);
         esp_timer_delete(preview_timer_);
@@ -272,6 +298,10 @@ void StackChanAvatarDisplay::SetupUI()
     stackchan.addModifier(std::make_unique<HeadPetModifier>());
     stackchan.addModifier(std::make_unique<ImuEventModifier>());
 
+    codex_pet_view_ = std::make_unique<CodexPetView>();
+    codex_pet_view_->init(lv_screen_active());
+    StartCodexPetTask();
+
     preview_image_ = lv_image_create(lv_screen_active());
     lv_obj_set_size(preview_image_, 320, 240);
     lv_obj_align(preview_image_, LV_ALIGN_CENTER, 0, 0);
@@ -283,6 +313,141 @@ void StackChanAvatarDisplay::SetupUI()
     idle_motion_level_ = config.idleRandomMovementLevel;
 
     ESP_LOGI(TAG, "Avatar created and started");
+}
+
+void StackChanAvatarDisplay::StartCodexPetTask()
+{
+    if (codex_pet_task_ != nullptr) {
+        return;
+    }
+    BaseType_t result = xTaskCreate(CodexPetTaskEntry, "codex_pet", 8192, this, 2, &codex_pet_task_);
+    if (result == pdPASS) {
+        return;
+    }
+
+    ESP_LOGE(TAG, "Failed to create Codex pet task");
+    codex_pet_task_ = nullptr;
+}
+
+void StackChanAvatarDisplay::CodexPetTaskEntry(void* argument)
+{
+    static_cast<StackChanAvatarDisplay*>(argument)->RunCodexPetTask();
+}
+
+void StackChanAvatarDisplay::RunCodexPetTask()
+{
+    while (!codex_pet_stop_requested_.load()) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        while (codex_pet_active_.load() && !codex_pet_stop_requested_.load()) {
+            CodexPetData codexPetData;
+            if (!FetchCodexPet(codexPetData)) {
+                codexPetData.state = CodexPetState::Idle;
+            }
+            {
+                std::lock_guard<std::mutex> lock(codex_pet_data_mutex_);
+                codex_pet_pending_data_ = std::move(codexPetData);
+            }
+            codex_pet_data_pending_.store(true);
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(CODEX_PET_REFRESH_INTERVAL_MS));
+        }
+    }
+    vTaskDelete(nullptr);
+}
+
+bool StackChanAvatarDisplay::FetchCodexPet(CodexPetData& data)
+{
+    std::string endpoint = get_stackchan_endpoint("/stackchan/codex-pet");
+    if (endpoint.empty()) {
+        ESP_LOGE(TAG, "Codex pet endpoint cannot be derived from the OTA URL");
+        return false;
+    }
+
+    auto network = Board::GetInstance().GetNetwork();
+    auto http = network->CreateHttp(0);
+    if (!http) {
+        ESP_LOGE(TAG, "Failed to create Codex pet HTTP client");
+        return false;
+    }
+    http->SetHeader("Accept", "application/json");
+    if (!http->Open("GET", endpoint)) {
+        ESP_LOGE(TAG, "Failed to open Codex pet endpoint");
+        return false;
+    }
+    if (http->GetStatusCode() != 200) {
+        ESP_LOGE(TAG, "Codex pet endpoint returned status %d", http->GetStatusCode());
+        http->Close();
+        return false;
+    }
+
+    std::string response = http->ReadAll();
+    http->Close();
+    if (response.size() > 2048) {
+        ESP_LOGE(TAG, "Codex pet response is too large: %u bytes", static_cast<unsigned>(response.size()));
+        return false;
+    }
+
+    ArduinoJson::JsonDocument document;
+    auto jsonError = ArduinoJson::deserializeJson(document, response);
+    if (jsonError) {
+        ESP_LOGE(TAG, "Failed to parse Codex pet response: %s", jsonError.c_str());
+        return false;
+    }
+
+    const char* state = document["state"] | "";
+    if (strcmp(state, "idle") == 0) {
+        data.state = CodexPetState::Idle;
+    } else if (strcmp(state, "running") == 0) {
+        data.state = CodexPetState::Running;
+    } else if (strcmp(state, "needs_input") == 0) {
+        data.state = CodexPetState::NeedsInput;
+    } else if (strcmp(state, "ready") == 0) {
+        data.state = CodexPetState::Ready;
+    } else if (strcmp(state, "blocked") == 0) {
+        data.state = CodexPetState::Blocked;
+    } else {
+        ESP_LOGE(TAG, "Codex pet response contains unsupported state: %s", state);
+        return false;
+    }
+    data.workspace = document["workspace"] | "";
+    data.activeTasks = document["active_tasks"] | 0;
+    return true;
+}
+
+void StackChanAvatarDisplay::SetCodexPetActive(bool active)
+{
+    bool was_active = codex_pet_active_.exchange(active);
+    if (active && !was_active) {
+        if (codex_pet_task_ != nullptr) {
+            xTaskNotifyGive(codex_pet_task_);
+        }
+    } else if (!active && was_active) {
+        if (codex_pet_view_) {
+            codex_pet_view_->hide();
+        }
+        if (codex_pet_task_ != nullptr) {
+            xTaskNotifyGive(codex_pet_task_);
+        }
+    }
+}
+
+void StackChanAvatarDisplay::UpdateCodexPet()
+{
+    if (!codex_pet_view_) {
+        return;
+    }
+    if (!codex_pet_active_.load()) {
+        codex_pet_view_->hide();
+        return;
+    }
+    if (codex_pet_data_pending_.exchange(false)) {
+        CodexPetData data;
+        {
+            std::lock_guard<std::mutex> lock(codex_pet_data_mutex_);
+            data = codex_pet_pending_data_;
+        }
+        codex_pet_view_->setData(data);
+    }
+    codex_pet_view_->show();
 }
 
 void StackChanAvatarDisplay::LvglLock()
@@ -488,12 +653,9 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     }
 
     auto& avatar = stackchan.avatar();
-    auto& motion = stackchan.motion();
-
     DisplayLockGuard lock(this);
 
-    bool is_idle      = false;
-    bool is_listening = false;
+    bool is_idle = false;
 
     if (strcmp(status, Lang::Strings::LISTENING) == 0) {
         if (speaking_modifier_id_ >= 0) {
@@ -542,7 +704,6 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
             idle_expression_modifier_id_ = stackchan.addModifier(std::make_unique<IdleExpressionModifier>());
         }
 
-        _is_xiaozhi_idle = true;
     } else {
         // Stop idle motion
         ESP_LOGW(TAG, "Stop idle motion");
@@ -553,14 +714,10 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
             idle_expression_modifier_id_ = -1;
         }
 
-        // if (!is_listening) {
-        //     // Return to default pose
-        //     motion.pitchServo().moveWithSpeed(200, 350);
-        //     motion.yawServo().moveWithSpeed(0, 350);
-        // }
-
-        _is_xiaozhi_idle = false;
     }
+
+    _is_xiaozhi_idle = is_idle;
+    SetCodexPetActive(is_idle);
 
     // Clear sleep state
     if (is_sleeping_) {

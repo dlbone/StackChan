@@ -4,11 +4,16 @@
  * SPDX-License-Identifier: MIT
  */
 #pragma once
+#include "codex_pet_view.h"
 #include <display/lvgl_display/lvgl_display.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <atomic>
 #include <memory>
+#include <mutex>
 
 class StackChanAvatarDisplay : public LvglDisplay {
 private:
@@ -25,7 +30,20 @@ private:
     esp_timer_handle_t preview_timer_                = nullptr;
     std::unique_ptr<LvglImage> preview_image_cached_ = nullptr;
 
+    std::unique_ptr<CodexPetView> codex_pet_view_;
+    TaskHandle_t codex_pet_task_ = nullptr;
+    std::atomic<bool> codex_pet_active_{false};
+    std::atomic<bool> codex_pet_stop_requested_{false};
+    std::atomic<bool> codex_pet_data_pending_{false};
+    std::mutex codex_pet_data_mutex_;
+    CodexPetData codex_pet_pending_data_;
+
     void CreateIdleMotionModifier();
+    void StartCodexPetTask();
+    void SetCodexPetActive(bool active);
+    void RunCodexPetTask();
+    bool FetchCodexPet(CodexPetData& data);
+    static void CodexPetTaskEntry(void* argument);
 
 protected:
     virtual bool Lock(int timeout_ms = 0) override;
@@ -49,6 +67,7 @@ public:
     virtual void SetStatus(const char* status) override;
     virtual void ShowNotification(const char* notification, int duration_ms = 3000) override;
 
+    void UpdateCodexPet();
     void LvglLock();
     void LvglUnlock();
     lv_disp_t* GetLvglDisplay();

@@ -1,0 +1,18 @@
+Start testing: Jul 13 12:49 EDT
+----------------------------------------------------------
+1/1 Testing: motion_math_test
+1/1 Test: motion_math_test
+Command: "/mnt/c/Users/bowie/Documents/GitHub/stackchan/firmware/build-host-tests/motion_math_test"
+Directory: /mnt/c/Users/bowie/Documents/GitHub/stackchan/firmware/build-host-tests
+"motion_math_test" start time: Jul 13 12:49 EDT
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"motion_math_test" end time: Jul 13 12:49 EDT
+"motion_math_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Jul 13 12:49 EDT

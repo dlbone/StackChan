@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hal.h"
+#include "board/stackchan_display.h"
+#include <board.h>
 #include <memory>
 #include <mooncake_log.h>
 #include <nvs_flash.h>
@@ -158,6 +160,9 @@ static void _stackchan_update_task(void* param)
         }
 
         GetStackChan().update();
+
+        auto display = static_cast<StackChanAvatarDisplay*>(Board::GetInstance().GetDisplay());
+        display->UpdateCodexPet();
 
         if (!hal_bridge::is_xiaozhi_ready()) {
             continue;

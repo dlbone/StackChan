@@ -5,6 +5,7 @@
 
 #include <esp_codec_dev.h>
 #include <esp_codec_dev_defaults.h>
+#include <mutex>
 
 class CoreS3AudioCodec : public AudioCodec {
 private:
@@ -17,8 +18,14 @@ private:
 
     esp_codec_dev_handle_t output_dev_ = nullptr;
     esp_codec_dev_handle_t input_dev_ = nullptr;
+    std::mutex data_if_mutex_;
+    bool input_device_open_ = false;
+    bool output_device_open_ = false;
 
     void CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout, gpio_num_t din);
+    bool OpenInputDevice();
+    bool OpenOutputDevice();
+    void CloseDeviceAfterOpenFailure(esp_codec_dev_handle_t device, const char* device_name);
 
     virtual int Read(int16_t* dest, int samples) override;
     virtual int Write(const int16_t* data, int samples) override;

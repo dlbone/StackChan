@@ -1,0 +1,4 @@
+/mnt/c/Users/bowie/Documents/GitHub/stackchan/firmware/build-host-tests/CMakeFiles/motion_math_test.dir
+/mnt/c/Users/bowie/Documents/GitHub/stackchan/firmware/build-host-tests/CMakeFiles/test.dir
+/mnt/c/Users/bowie/Documents/GitHub/stackchan/firmware/build-host-tests/CMakeFiles/edit_cache.dir
+/mnt/c/Users/bowie/Documents/GitHub/stackchan/firmware/build-host-tests/CMakeFiles/rebuild_cache.dir

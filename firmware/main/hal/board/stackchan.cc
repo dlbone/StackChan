@@ -26,6 +26,12 @@
 
 class Pmic : public Axp2101 {
 public:
+    struct PowerState {
+        bool has_external_power;
+        bool is_charging;
+        bool is_discharging;
+    };
+
     /**
      * @brief axp2101 charge currnet voltage parameters.
      */
@@ -114,15 +120,32 @@ public:
         return true;
     }
 
-    bool IsExternalPowerConnected()
+    bool TryGetPowerState(PowerState& power_state)
     {
-        const uint8_t power_status      = ReadReg(0x01);
+        uint8_t power_status = 0;
+        if (TryReadRegs(0x01, &power_status, 1) != ESP_OK) {
+            return false;
+        }
+
         const uint8_t current_direction = (power_status & 0b01100000) >> 5;
         const bool is_charging_done     = (power_status & 0b00000111) == 0b00000100;
 
         // Treat any non-discharging state as externally powered so a plugged-in cable
         // still counts even after the battery is full.
-        return current_direction != 2 || is_charging_done;
+        power_state.has_external_power = current_direction != 2 || is_charging_done;
+        power_state.is_charging        = current_direction == 1;
+        power_state.is_discharging     = current_direction == 2;
+        return true;
+    }
+
+    bool TryGetBatteryLevel(int& battery_level)
+    {
+        uint8_t level = 0;
+        if (TryReadRegs(0xA4, &level, 1) != ESP_OK) {
+            return false;
+        }
+        battery_level = level;
+        return true;
     }
 };
 
@@ -276,7 +299,12 @@ private:
         }
         last_power_state_check_ms_ = now_ms;
 
-        UpdatePowerSaveEnabled(pmic_->IsExternalPowerConnected(), pmic_->IsDischarging());
+        Pmic::PowerState power_state;
+        if (!pmic_->TryGetPowerState(power_state)) {
+            ESP_LOGW(TAG, "Skipped power-save update because the PMIC status read timed out");
+            return;
+        }
+        UpdatePowerSaveEnabled(power_state.has_external_power, power_state.is_discharging);
     }
 
     void InitializePowerSaveTimer()
@@ -303,7 +331,12 @@ private:
             GetBacklight()->RestoreBrightness();
         });
         power_save_timer_->OnShutdownRequest([this]() { pmic_->PowerOff(); });
-        UpdatePowerSaveEnabled(pmic_->IsExternalPowerConnected(), pmic_->IsDischarging());
+        Pmic::PowerState power_state;
+        if (!pmic_->TryGetPowerState(power_state)) {
+            ESP_LOGW(TAG, "Initial PMIC status read timed out; power-save state will update on the next poll");
+            return;
+        }
+        UpdatePowerSaveEnabled(power_state.has_external_power, power_state.is_discharging);
     }
 
     void InitializeI2c()
@@ -526,15 +559,22 @@ public:
 
     virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override
     {
+        Pmic::PowerState power_state;
+        int current_level = 0;
+        if (!pmic_->TryGetPowerState(power_state) || !pmic_->TryGetBatteryLevel(current_level)) {
+            ESP_LOGW(TAG, "Battery status unavailable because a PMIC read timed out");
+            return false;
+        }
+
         static bool last_discharging = false;
-        charging                     = pmic_->IsCharging();
-        discharging                  = pmic_->IsDischarging();
+        charging                     = power_state.is_charging;
+        discharging                  = power_state.is_discharging;
         if (discharging != last_discharging) {
             power_save_timer_->SetEnabled(discharging);
             last_discharging = discharging;
         }
 
-        level = pmic_->GetBatteryLevel();
+        level = current_level;
         return true;
     }
 

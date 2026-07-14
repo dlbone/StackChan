@@ -183,50 +183,100 @@ void CoreS3AudioCodec::CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gp
 }
 
 void CoreS3AudioCodec::SetOutputVolume(int volume) {
-    ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, volume));
+    std::lock_guard<std::mutex> lock(data_if_mutex_);
     AudioCodec::SetOutputVolume(volume);
+    if (!output_device_open_) {
+        return;
+    }
+
+    esp_err_t error = esp_codec_dev_set_out_vol(output_dev_, volume);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set output volume: %s", esp_err_to_name(error));
+    }
+}
+
+void CoreS3AudioCodec::CloseDeviceAfterOpenFailure(esp_codec_dev_handle_t device, const char* device_name) {
+    esp_err_t close_error = esp_codec_dev_close(device);
+    if (close_error != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to clean up %s after open failure: %s", device_name, esp_err_to_name(close_error));
+    }
+}
+
+bool CoreS3AudioCodec::OpenInputDevice() {
+    esp_codec_dev_sample_info_t fs = {
+        .bits_per_sample = 16,
+        .channel = 2,
+        .channel_mask = ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0),
+        .sample_rate = (uint32_t)input_sample_rate_,
+        .mclk_multiple = 0,
+    };
+    if (input_reference_) {
+        fs.channel_mask |= ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1);
+    }
+
+    esp_err_t error = esp_codec_dev_open(input_dev_, &fs);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open input device: %s", esp_err_to_name(error));
+        CloseDeviceAfterOpenFailure(input_dev_, "input device");
+        return false;
+    }
+
+    error = esp_codec_dev_set_in_channel_gain(input_dev_, ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0), input_gain_);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set input gain: %s", esp_err_to_name(error));
+        CloseDeviceAfterOpenFailure(input_dev_, "input device");
+        return false;
+    }
+
+    input_device_open_ = true;
+    return true;
+}
+
+bool CoreS3AudioCodec::OpenOutputDevice() {
+    esp_codec_dev_sample_info_t fs = {
+        .bits_per_sample = 16,
+        .channel = 1,
+        .channel_mask = 0,
+        .sample_rate = (uint32_t)output_sample_rate_,
+        .mclk_multiple = 0,
+    };
+
+    esp_err_t error = esp_codec_dev_open(output_dev_, &fs);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open output device: %s", esp_err_to_name(error));
+        CloseDeviceAfterOpenFailure(output_dev_, "output device");
+        return false;
+    }
+
+    error = esp_codec_dev_set_out_vol(output_dev_, output_volume_);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set output volume: %s", esp_err_to_name(error));
+        CloseDeviceAfterOpenFailure(output_dev_, "output device");
+        return false;
+    }
+
+    output_device_open_ = true;
+    return true;
 }
 
 void CoreS3AudioCodec::EnableInput(bool enable) {
+    std::lock_guard<std::mutex> lock(data_if_mutex_);
     if (enable == input_enabled_) {
         return;
     }
-    if (enable) {
-        esp_codec_dev_sample_info_t fs = {
-            .bits_per_sample = 16,
-            .channel = 2,
-            .channel_mask = ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0),
-            .sample_rate = (uint32_t)output_sample_rate_,
-            .mclk_multiple = 0,
-        };
-        if (input_reference_) {
-            fs.channel_mask |= ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1);
-        }
-        ESP_ERROR_CHECK(esp_codec_dev_open(input_dev_, &fs));
-        ESP_ERROR_CHECK(esp_codec_dev_set_in_channel_gain(input_dev_, ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0), input_gain_));
-    } else {
-        ESP_ERROR_CHECK(esp_codec_dev_close(input_dev_));
+    if (enable && !input_device_open_ && !OpenInputDevice()) {
+        return;
     }
     AudioCodec::EnableInput(enable);
 }
 
 void CoreS3AudioCodec::EnableOutput(bool enable) {
+    std::lock_guard<std::mutex> lock(data_if_mutex_);
     if (enable == output_enabled_) {
         return;
     }
-    if (enable) {
-        // Play 16bit 1 channel
-        esp_codec_dev_sample_info_t fs = {
-            .bits_per_sample = 16,
-            .channel = 1,
-            .channel_mask = 0,
-            .sample_rate = (uint32_t)output_sample_rate_,
-            .mclk_multiple = 0,
-        };
-        ESP_ERROR_CHECK(esp_codec_dev_open(output_dev_, &fs));
-        ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, output_volume_));
-    } else {
-        ESP_ERROR_CHECK(esp_codec_dev_close(output_dev_));
+    if (enable && !output_device_open_ && !OpenOutputDevice()) {
+        return;
     }
     AudioCodec::EnableOutput(enable);
 }

@@ -1,0 +1,1 @@
+/usr/bin/c++ CMakeFiles/motion_math_test.dir/motion_math_test.cpp.o CMakeFiles/motion_math_test.dir/mnt/c/Users/bowie/Documents/GitHub/stackchan/firmware/main/stackchan/motion/motion_math.cpp.o -o motion_math_test 
