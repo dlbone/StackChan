@@ -415,7 +415,6 @@ bool StackChanAvatarDisplay::FetchCodexPet(CodexPetData& data)
         ESP_LOGE(TAG, "Codex pet response contains unsupported state: %s", state);
         return false;
     }
-    data.workspace = document["workspace"] | "";
     data.activeTasks = document["active_tasks"] | 0;
     return true;
 }

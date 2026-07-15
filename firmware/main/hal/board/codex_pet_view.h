@@ -19,7 +19,6 @@ enum class CodexPetState {
 
 struct CodexPetData {
     CodexPetState state = CodexPetState::Idle;
-    std::string workspace;
     int activeTasks = 0;
 };
 

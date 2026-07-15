@@ -107,10 +107,6 @@ void CodexPetView::setData(const CodexPetData& data)
     const AnimationDefinition& animation = animationForState(data.state);
     std::string label = "CODEX  ";
     label += animation.label;
-    if (!data.workspace.empty()) {
-        label += "  ";
-        label += data.workspace;
-    }
     if (data.activeTasks > 1) {
         char taskCount[16];
         std::snprintf(taskCount, sizeof(taskCount), "  +%d", data.activeTasks - 1);
